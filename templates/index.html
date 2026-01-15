@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Provably Fair Poker</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>🃏 Provably Fair Poker</h1>
+        
+        <div class="join-section" id="joinSection">
+            <h2>Create or Join Room</h2>
+            <input type="text" id="playerName" placeholder="Enter your name" />
+            <input type="text" id="roomId" placeholder="Room ID" value="default" />
+            
+            <div class="blind-settings">
+                <h3>Blind Settings (for new rooms)</h3>
+                <label>Small Blind: $<input type="number" id="smallBlind" value="10" min="1" /></label>
+                <label>Big Blind: $<input type="number" id="bigBlind" value="20" min="2" /></label>
+            </div>
+            
+            <button onclick="createRoom()" class="create-btn">Create Room</button>
+            <button onclick="joinGame()">Join Existing Room</button>
+        </div>
+
+        <div class="game-section" id="gameSection" style="display: none;">
+            <div class="info-bar">
+                <div>Room: <span id="currentRoom"></span></div>
+                <div>Players: <span id="playerCount">0</span></div>
+                <div>Pot: $<span id="pot">0</span></div>
+                <div>Blinds: $<span id="blindsDisplay">10/20</span></div>
+                <div>Current Bet: $<span id="currentBet">0</span></div>
+            </div>
+
+            <div class="creator-controls" id="creatorControls" style="display: none;">
+                <button onclick="startGame()" id="startGameBtn" class="start-game-btn">▶ Start Game</button>
+                <button onclick="pauseGame()" id="pauseGameBtn" class="pause-game-btn" style="display: none;">⏸ Pause Game</button>
+            </div>
+
+            <div class="poker-table">
+                <div class="community-cards" id="communityCards">
+                    <div class="card-placeholder"></div>
+                    <div class="card-placeholder"></div>
+                    <div class="card-placeholder"></div>
+                    <div class="card-placeholder"></div>
+                    <div class="card-placeholder"></div>
+                </div>
+
+                <div class="players-container" id="playersContainer">
+                </div>
+            </div>
+
+            <div class="your-hand">
+                <h3>Your Hand</h3>
+                <div id="yourCards" class="hand-cards">
+                    <div class="card-placeholder"></div>
+                    <div class="card-placeholder"></div>
+                </div>
+                <div class="your-chips">Chips: $<span id="yourChips">1000</span></div>
+            </div>
+
+            <div class="showdown-message" id="showdownMessage" style="display: none;">
+                <h2 id="winnerText"></h2>
+            </div>
+
+            <div class="turn-indicator" id="turnIndicator" style="display: none;">
+                <strong>🎯 YOUR TURN</strong>
+            </div>
+
+            <div class="controls">
+                <div class="betting-controls" id="bettingControls" style="display: none;">
+                    <button onclick="playerFold()" class="fold-btn">Fold</button>
+                    <button onclick="playerCheck()" id="checkBtn">Check</button>
+                    <button onclick="playerCall()" id="callBtn">Call $<span id="callAmount">0</span></button>
+                    
+                    <div class="raise-controls">
+                        <input type="number" id="raiseAmount" placeholder="Raise amount" min="1" />
+                        <button onclick="playerRaise()">Raise</button>
+                    </div>
+                </div>
+                
+                <button onclick="verifySeed()" id="verifyBtn">Verify Seed</button>
+            </div>
+        </div>
+
+        <div class="verification" id="verification" style="display: none;">
+            <h3>Seed Verification</h3>
+            <p><strong>Original Hash:</strong> <code id="verifyHash"></code></p>
+            <p><strong>Revealed Seed:</strong> <code id="verifySeed"></code></p>
+            <p><strong>Status:</strong> <span id="verifyStatus"></span></p>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        let currentPlayerId = null;
+        let currentRoomId = null;
+        let currentGameState = null;
+        let timerIntervals = {};
+
+        function createRoom() {
+            const playerName = document.getElementById('playerName').value || 'Anonymous';
+            const roomId = document.getElementById('roomId').value || 'default';
+            const smallBlind = document.getElementById('smallBlind').value;
+            const bigBlind = document.getElementById('bigBlind').value;
+            
+            socket.emit('create_room', { 
+                player_name: playerName, 
+                room_id: roomId,
+                small_blind: smallBlind,
+                big_blind: bigBlind
+            });
+            
+            document.getElementById('joinSection').style.display = 'none';
+            document.getElementById('gameSection').style.display = 'block';
+        }
+
+        function joinGame() {
+            const playerName = document.getElementById('playerName').value || 'Anonymous';
+            const roomId = document.getElementById('roomId').value || 'default';
+            
+            socket.emit('join_game', { player_name: playerName, room_id: roomId });
+            
+            document.getElementById('joinSection').style.display = 'none';
+            document.getElementById('gameSection').style.display = 'block';
+        }
+
+        function startGame() {
+            socket.emit('start_game', { room_id: currentRoomId });
+        }
+
+        function pauseGame() {
+            socket.emit('pause_game', { room_id: currentRoomId });
+        }
+
+        function playerFold() {
+            socket.emit('player_action', { room_id: currentRoomId, action: 'fold' });
+        }
+
+        function playerCheck() {
+            socket.emit('player_action', { room_id: currentRoomId, action: 'check' });
+        }
+
+        function playerCall() {
+            socket.emit('player_action', { room_id: currentRoomId, action: 'call' });
+        }
+
+        function playerRaise() {
+            const raiseAmount = parseInt(document.getElementById('raiseAmount').value);
+            if (!raiseAmount || raiseAmount <= 0) {
+                alert('Please enter a valid raise amount');
+                return;
+            }
+            socket.emit('player_action', { 
+                room_id: currentRoomId, 
+                action: 'raise',
+                raise_amount: raiseAmount
+            });
+            document.getElementById('raiseAmount').value = '';
+        }
+
+        function verifySeed() {
+            socket.emit('verify_seed', { room_id: currentRoomId });
+        }
+
+        socket.on('joined', (data) => {
+            currentPlayerId = data.player_id;
+            currentRoomId = data.room_id;
+            document.getElementById('currentRoom').textContent = data.room_id;
+        });
+
+        socket.on('game_state', (gameState) => {
+            currentGameState = gameState;
+            updateGameUI(gameState);
+        });
+
+        socket.on('seed_revealed', (data) => {
+            document.getElementById('verification').style.display = 'block';
+            document.getElementById('verifyHash').textContent = data.seed_hash;
+            document.getElementById('verifySeed').textContent = data.seed;
+            
+            crypto.subtle.digest('SHA-256', new TextEncoder().encode(data.seed))
+                .then(hashBuffer => {
+                    const hashArray = Array.from(new Uint8Array(hashBuffer));
+                    const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+                    const verified = hashHex === data.seed_hash;
+                    document.getElementById('verifyStatus').textContent = verified ? '✅ VERIFIED' : '❌ FAILED';
+                    document.getElementById('verifyStatus').style.color = verified ? 'green' : 'red';
+                });
+        });
+
+        socket.on('error', (data) => {
+            alert(data.message);
+        });
+
+        function updateGameUI(gameState) {
+            // Update info bar
+            document.getElementById('playerCount').textContent = gameState.players.length;
+            document.getElementById('pot').textContent = gameState.pot;
+            document.getElementById('currentBet').textContent = gameState.current_bet;
+            document.getElementById('blindsDisplay').textContent = `${gameState.small_blind}/${gameState.big_blind}`;
+
+            // Show/hide showdown message
+            const showdownMsg = document.getElementById('showdownMessage');
+            if (gameState.hand_state === 'showdown') {
+                const activePlayers = gameState.players.filter(p => !p.folded);
+                if (activePlayers.length === 1) {
+                    document.getElementById('winnerText').textContent = 
+                        `🎉 ${activePlayers[0].name} wins ${gameState.pot}!`;
+                } else {
+                    document.getElementById('winnerText').textContent = 
+                        `🎉 Showdown! Pot: ${gameState.pot}`;
+                }
+                showdownMsg.style.display = 'block';
+            } else {
+                showdownMsg.style.display = 'none';
+            }
+
+            // Show creator controls if user is creator
+            if (currentPlayerId === gameState.creator_id) {
+                document.getElementById('creatorControls').style.display = 'block';
+                if (gameState.state === 'waiting') {
+                    document.getElementById('startGameBtn').style.display = 'inline-block';
+                    document.getElementById('pauseGameBtn').style.display = 'none';
+                } else if (gameState.state === 'playing') {
+                    document.getElementById('startGameBtn').style.display = 'none';
+                    document.getElementById('pauseGameBtn').style.display = 'inline-block';
+                } else if (gameState.state === 'paused') {
+                    document.getElementById('startGameBtn').style.display = 'inline-block';
+                    document.getElementById('startGameBtn').textContent = '▶ Resume Game';
+                    document.getElementById('pauseGameBtn').style.display = 'none';
+                }
+            } else {
+                document.getElementById('creatorControls').style.display = 'none';
+            }
+
+            // Update community cards
+            const communityContainer = document.getElementById('communityCards');
+            communityContainer.innerHTML = '';
+            for (let i = 0; i < 5; i++) {
+                const card = gameState.community_cards[i];
+                const cardEl = document.createElement('div');
+                cardEl.className = card ? 'card' : 'card-placeholder';
+                if (card) {
+                    cardEl.textContent = card.rank + card.suit;
+                    cardEl.classList.add(card.suit === '♥' || card.suit === '♦' ? 'red' : 'black');
+                }
+                communityContainer.appendChild(cardEl);
+            }
+
+            // Update your hand and chips
+            const yourCards = document.getElementById('yourCards');
+            yourCards.innerHTML = '';
+            const currentPlayer = gameState.players.find(p => p.id === currentPlayerId);
+            if (currentPlayer) {
+                document.getElementById('yourChips').textContent = currentPlayer.chips;
+                
+                if (currentPlayer.hand.length > 0) {
+                    currentPlayer.hand.forEach(card => {
+                        const cardEl = document.createElement('div');
+                        cardEl.className = 'card';
+                        cardEl.textContent = card.rank + card.suit;
+                        cardEl.classList.add(card.suit === '♥' || card.suit === '♦' ? 'red' : 'black');
+                        yourCards.appendChild(cardEl);
+                    });
+                } else {
+                    yourCards.innerHTML = '<div class="card-placeholder"></div><div class="card-placeholder"></div>';
+                }
+            }
+
+            // Clear existing timer intervals
+            Object.values(timerIntervals).forEach(interval => clearInterval(interval));
+            timerIntervals = {};
+
+            // Update players
+            const playersContainer = document.getElementById('playersContainer');
+            playersContainer.innerHTML = '';
+            gameState.players.forEach((player, index) => {
+                const playerEl = document.createElement('div');
+                playerEl.className = 'player-info';
+                if (player.folded) playerEl.classList.add('folded');
+                if (index === gameState.dealer_position) playerEl.classList.add('dealer');
+                if (player.id === gameState.current_player_id) playerEl.classList.add('current-turn');
+                
+                const isCurrentPlayer = player.id === gameState.current_player_id;
+                const timerId = `timer-${player.id}`;
+                
+                playerEl.innerHTML = `
+                    <div><strong>${player.name}</strong> ${index === gameState.dealer_position ? '🔘' : ''}</div>
+                    <div>Chips: $${player.chips}</div>
+                    <div>Bet: $${player.bet}</div>
+                    ${isCurrentPlayer && gameState.hand_state !== 'none' && gameState.hand_state !== 'showdown' ? 
+                        `<div class="timer-bar-container">
+                            <div class="timer-bar" id="${timerId}"></div>
+                        </div>
+                        <div class="timer-text">${Math.ceil(player.time_remaining)}s</div>` : ''}
+                    ${player.folded ? '<div class="folded-label">FOLDED</div>' : ''}
+                `;
+                playersContainer.appendChild(playerEl);
+
+                // Start timer countdown if this is the current player
+                if (isCurrentPlayer && gameState.hand_state !== 'none' && gameState.hand_state !== 'showdown') {
+                    let timeLeft = player.time_remaining;
+                    const maxTime = gameState.action_timer;
+                    const timerBar = document.getElementById(timerId);
+                    
+                    timerIntervals[player.id] = setInterval(() => {
+                        timeLeft -= 0.1;
+                        if (timeLeft <= 0) {
+                            clearInterval(timerIntervals[player.id]);
+                            timeLeft = 0;
+                        }
+                        
+                        const percentage = (timeLeft / maxTime) * 100;
+                        if (timerBar) {
+                            timerBar.style.width = percentage + '%';
+                            
+                            // Change color based on time remaining
+                            if (percentage > 50) {
+                                timerBar.style.backgroundColor = '#4CAF50';
+                            } else if (percentage > 25) {
+                                timerBar.style.backgroundColor = '#FFC107';
+                            } else {
+                                timerBar.style.backgroundColor = '#f44336';
+                            }
+                        }
+                        
+                        const timerText = playerEl.querySelector('.timer-text');
+                        if (timerText) {
+                            timerText.textContent = Math.ceil(timeLeft) + 's';
+                        }
+                    }, 100);
+                }
+            });
+
+            // Update controls based on game state and turn
+            const isYourTurn = gameState.current_player_id === currentPlayerId;
+            const isPlaying = gameState.hand_state !== 'none' && gameState.hand_state !== 'showdown';
+            
+            document.getElementById('bettingControls').style.display = 
+                (isPlaying && isYourTurn) ? 'flex' : 'none';
+            document.getElementById('turnIndicator').style.display = 
+                (isYourTurn && isPlaying) ? 'block' : 'none';
+            
+            if (isYourTurn && currentPlayer) {
+                const callAmount = gameState.current_bet - currentPlayer.bet;
+                document.getElementById('callAmount').textContent = callAmount;
+                
+                // Show/hide check vs call button
+                if (callAmount === 0) {
+                    document.getElementById('checkBtn').style.display = 'inline-block';
+                    document.getElementById('callBtn').style.display = 'none';
+                } else {
+                    document.getElementById('checkBtn').style.display = 'none';
+                    document.getElementById('callBtn').style.display = 'inline-block';
+                }
+            }
+        }
+    </script>
+</body>
+</html>
